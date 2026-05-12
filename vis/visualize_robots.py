@@ -220,10 +220,19 @@ def _load_robot(
     urdf_path: Path,
     root_node_name: str,
     base_position: tuple[float, float, float],
-) -> tuple[viser.FrameHandle, ViserUrdf]:
+    root_handle_scale: float = 0.35,
+) -> tuple[viser.FrameHandle, viser.TransformControlsHandle, ViserUrdf]:
+    """Load a URDF at `root_node_name` with a separate 6-DoF drag handle.
+
+    The frame at `root_node_name` is the parent of the URDF meshes and the
+    per-joint gizmos (under `{root_node_name}/gizmos/...`). A sibling
+    `TransformControls` at `{root_node_name}_handle` drives the frame via its
+    `on_update` callback — this way, hiding the gizmo doesn't also hide the
+    meshes and joint gizmos parented under the frame.
+    """
     if not urdf_path.exists():
         raise FileNotFoundError(f"URDF not found: {urdf_path}")
-    frame = server.scene.add_frame(
+    root_frame = server.scene.add_frame(
         root_node_name,
         position=base_position,
         show_axes=False,
@@ -234,16 +243,36 @@ def _load_robot(
         build_scene_graph=True,
     )
     vurdf = ViserUrdf(server, urdf_or_path=urdf, root_node_name=root_node_name)
-    return frame, vurdf
+
+    root_handle = server.scene.add_transform_controls(
+        f"{root_node_name}_handle",
+        scale=root_handle_scale,
+        position=base_position,
+        depth_test=False,
+    )
+
+    @root_handle.on_update
+    def _(_event: object) -> None:
+        root_frame.position = root_handle.position
+        root_frame.wxyz = root_handle.wxyz
+
+    return root_frame, root_handle, vurdf
 
 
-def _drop_feet_to_floor(frame: viser.FrameHandle, vurdf: ViserUrdf, floor_z: float) -> None:
+def _drop_feet_to_floor(
+    root_frame: viser.FrameHandle,
+    root_handle: viser.TransformControlsHandle,
+    vurdf: ViserUrdf,
+    floor_z: float,
+) -> None:
     scene = vurdf._urdf.scene or vurdf._urdf.collision_scene
     if scene is None:
         return
     min_z = float(scene.bounds[0, 2])
-    x, y, _ = frame.position
-    frame.position = (x, y, floor_z - min_z)
+    x, y, _ = root_frame.position
+    new_pos = (x, y, floor_z - min_z)
+    root_frame.position = new_pos
+    root_handle.position = new_pos
 
 
 def main(
@@ -267,15 +296,15 @@ def main(
 
     floor_z = 0.0
     half = spacing / 2.0
-    t1_frame, t1 = _load_robot(server, t1_urdf, "/t1", base_position=(0.0, +half, 0.0))
-    g1_frame, g1 = _load_robot(server, g1_urdf, "/g1", base_position=(0.0, -half, 0.0))
+    t1_frame, t1_handle, t1 = _load_robot(server, t1_urdf, "/t1", base_position=(0.0, +half, 0.0))
+    g1_frame, g1_handle, g1 = _load_robot(server, g1_urdf, "/g1", base_position=(0.0, -half, 0.0))
 
     t1_ctl = RobotJointControls(server, "/t1", t1, "Booster T1 joints", gizmo_scale=gizmo_scale)
     g1_ctl = RobotJointControls(server, "/g1", g1, "Unitree G1 joints", gizmo_scale=gizmo_scale)
 
     # Raise each robot so its lowest mesh vertex sits exactly on the floor.
-    _drop_feet_to_floor(t1_frame, t1, floor_z)
-    _drop_feet_to_floor(g1_frame, g1, floor_z)
+    _drop_feet_to_floor(t1_frame, t1_handle, t1, floor_z)
+    _drop_feet_to_floor(g1_frame, g1_handle, g1, floor_z)
 
     floor_size = max(4.0, spacing + 2.0)
     floor_thickness = 0.02
@@ -296,6 +325,7 @@ def main(
         show_visual_cb = server.gui.add_checkbox("Show visual meshes", initial_value=True)
         show_collision_cb = server.gui.add_checkbox("Show collision meshes", initial_value=False)
         show_handles_cb = server.gui.add_checkbox("Show joint handles", initial_value=True)
+        show_root_cb = server.gui.add_checkbox("Show root handles", initial_value=True)
 
     @show_visual_cb.on_update
     def _(_event: object) -> None:
@@ -312,12 +342,28 @@ def main(
         t1_ctl.set_gizmo_visibility(show_handles_cb.value)
         g1_ctl.set_gizmo_visibility(show_handles_cb.value)
 
-    reset_button = server.gui.add_button("Reset joints")
+    @show_root_cb.on_update
+    def _(_event: object) -> None:
+        t1_handle.visible = show_root_cb.value
+        g1_handle.visible = show_root_cb.value
+
+    reset_button = server.gui.add_button("Reset pose")
+    initial_t1_pos = t1_frame.position
+    initial_g1_pos = g1_frame.position
+    identity_wxyz = (1.0, 0.0, 0.0, 0.0)
 
     @reset_button.on_click
     def _(_event: object) -> None:
         t1_ctl.reset()
         g1_ctl.reset()
+        t1_frame.position = initial_t1_pos
+        g1_frame.position = initial_g1_pos
+        t1_frame.wxyz = identity_wxyz
+        g1_frame.wxyz = identity_wxyz
+        t1_handle.position = initial_t1_pos
+        g1_handle.position = initial_g1_pos
+        t1_handle.wxyz = identity_wxyz
+        g1_handle.wxyz = identity_wxyz
 
     print(f"[vis] T1 joints: {t1_ctl.n} | G1 joints: {g1_ctl.n}")
     print(f"[vis] Open the viser URL printed above (port {port}). Ctrl+C to exit.")
