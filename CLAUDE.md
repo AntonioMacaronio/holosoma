@@ -1,0 +1,1 @@
+To utilize the holosoma repository, please see the /home/sky/sky_workdir/holosoma/SETUP_NOTES.md for how we set up the repo on this machine.
