@@ -6,34 +6,43 @@ inline — resolve them before the phase that depends on them.
 
 ---
 
-## Phase 0 — Decisions to lock in before coding
+## Phase 0 — Decisions (locked in)
 
-These change the rest of the design, so pin them down first.
-
-- **0.1 Task framing.** Is the G1 policy:
-  - (a) a whole-body motion-tracking policy (WBT) conditioned on future
-    reference frames, or
-  - (b) a root-velocity-conditioned locomotion policy that uses the motion
-    data as a style/imitation prior (AMP / DeepMimic-style)?
-  - The existing infra in `src/holosoma/holosoma/config_values/wbt/g1/` is
-    (a). (b) would need a new task setup.
-- **0.2 What transfers across embodiments.** G1 and T1 both have 29 DOF but
-  different joint semantics (G1 has waist pitch/roll, T1 has only waist yaw;
-  different foot/knee link names). "Reinit the last few layers" isn't quite
-  right — the *input* proprioception dims are also semantically different.
-  Decide on one:
-  - reinit first + last layers, keep the middle as transferable backbone
-  - use an embodiment-agnostic observation representation (e.g., keypoints
-    in root frame) so only the action head needs reinit
-  - train with explicit embodiment embedding
-- **0.3 Baselines needed for the "10% data" claim.** Minimum set:
-  `{T1-scratch @ 100%, T1-scratch @ 10%, G1→T1-finetune @ 10%}`. Better:
-  sweep `{1, 5, 10, 25, 50, 100}%` and plot the learning curve.
-- **0.4 Success metrics.** Pick upfront, e.g. tracking MPJPE, root-pos drift,
-  survival time, reward at convergence, sample efficiency (steps to reach
-  threshold). Without these pinned, the ablation story is fuzzy.
-- **0.5 FPO scope.** Is flow-matching RL a required result or a stretch?
-  Recommend: stretch. See Phase 5.
+- **0.1 Task framing: whole-body motion tracking (WBT).** Policy conditioned
+  on future reference frames. Existing infra in
+  `src/holosoma/holosoma/config_values/wbt/g1/` is the right starting point.
+- **0.2 Transfer strategy: 5-layer MLP, reinit first and last layers.**
+  Pretrain the G1 policy as a 5-Linear-layer MLP (one deeper than the
+  repo default of 4 Linear layers) so the middle has capacity to encode
+  an embodiment-agnostic skill representation. On T1 finetune,
+  reinitialize layer 1 (obs → hidden) and layer 5 (hidden → action)
+  while keeping layers 2/3/4 from the G1 checkpoint.
+  - **PPO width**: `hidden_dims=[512, 512, 256, 128]` (current repo
+    default is `[512, 256, 128]` at `config_values/algo.py:46,52`).
+    `build_mlp_layer` in `agents/modules/modules.py:131` turns this into
+    5 Linear layers:
+    ```
+    Layer 1: obs → 512   [reinit on T1]
+    Layer 2: 512 → 512   [keep from G1]
+    Layer 3: 512 → 256   [keep from G1]
+    Layer 4: 256 → 128   [keep from G1]
+    Layer 5: 128 → act   [reinit on T1]
+    ```
+  - **FastSAC**: depth is *hardcoded* in `agents/fast_sac/fast_sac.py`
+    (4 Linear layers, widths `h → h/2 → h/4 → act` for the actor). Edit
+    `fast_sac.py` to insert a second `h → h` layer at the front so both
+    algorithms use 5 Linear layers with the same middle-3 transfer
+    pattern. See Phase 2.2 for implementation notes.
+  - Apply the same reinit-first-and-last scheme to the critic — see 4.3.
+- **0.3 Baselines: sweep over dataset fraction.** For each algorithm, run
+  `{1, 5, 10, 25, 50, 100}%` of the T1 dataset, both from-scratch and
+  G1-finetuned. 3 seeds per point. Plot as learning-efficiency curves.
+- **0.4 Eval metrics (three):**
+  - (a) motion tracking error (per-frame joint/body pose error vs. reference)
+  - (b) torso velocity tracking (commanded vs. achieved root velocity)
+  - (c) locomotion stability — survival time / fall rate
+- **0.5 Algorithms: PPO and FastSAC only.** No FPO. Comparison axes are
+  `{algorithm} × {scratch vs. finetuned} × {data fraction}`.
 
 ---
 
@@ -68,15 +77,35 @@ Goal: a trained G1 policy + ONNX export that tracks LAFAN-retargeted motion.
 - **2.1** Read and understand the existing G1 WBT config stack:
   `config_values/wbt/g1/{experiment,reward,observation,command,termination,randomization,curriculum}.py`.
   Note what's hardcoded vs. parameterized.
-- **2.2** Wire the Phase 1 dataset into the command manager. Confirm clip
+- **2.2** Set actor and critic architecture to a 5-Linear-layer MLP
+  (per 0.2). Specifics per algorithm:
+  - **PPO**: config-only change. In `config_values/algo.py:46,52` set
+    `hidden_dims=[512, 512, 256, 128]` for both actor and critic.
+    Depth is driven by the list length via `build_mlp_layer` in
+    `agents/modules/modules.py:131`. Can be overridden per-experiment
+    in `config_values/wbt/g1/experiment.py` via `replace()` instead of
+    touching the global default if you want to keep other experiments
+    on the old size.
+  - **FastSAC**: code change in `agents/fast_sac/fast_sac.py`. The actor
+    (around line 62) and critic (around line 225) each define a
+    4-Linear-layer Sequential with hardcoded widths `h → h/2 → h/4 → out`.
+    Insert an extra `Linear(h, h) → activation → LayerNorm?` block right
+    after the first layer to make it 5 Linear layers: `h → h → h/2 → h/4 → out`.
+    Match whatever normalization/activation pattern the existing layers
+    use (check for LayerNorm since `use_layer_norm=True` in the config).
+    Widths `actor_hidden_dim=512`, `critic_hidden_dim=768` stay as-is.
+  - Hidden-width contract: the layer-2/3/4 shapes (512→512, 512→256,
+    256→128 for PPO) are the contract T1 must match for checkpoint load
+    to succeed.
+- **2.3** Wire the Phase 1 dataset into the command manager. Confirm clip
   sampling, looping, and reset behavior.
-- **2.3** Short smoke-train on a single clip to verify the pipeline
+- **2.4** Short smoke-train on a single clip to verify the pipeline
   end-to-end before committing GPU hours.
-- **2.4** Full PPO training run on the G1 dataset using `train_agent.py`.
+- **2.5** Full PPO training run on the G1 dataset using `train_agent.py`.
   Log to W&B. Save checkpoints.
-- **2.5** Evaluate with `eval_agent.py` on held-out clips. Record the
+- **2.6** Evaluate with `eval_agent.py` on held-out clips. Record the
   Phase 0.4 metrics — these are your "upper-bound" reference numbers.
-- **2.6** Export to ONNX (existing infra in `holosoma_inference/`).
+- **2.7** Export to ONNX (existing infra in `holosoma_inference/`).
   Sanity-check it matches the torch policy on a few frames.
 
 ---
@@ -103,74 +132,100 @@ Goal: ~10% scale T1 dataset plus the T1 side of the WBT training config.
 
 ## Phase 4 — Transfer harness (G1 → T1 finetuning)
 
-Goal: infrastructure to load a G1 checkpoint, adapt the network for T1, and
-continue training.
+Goal: infrastructure to load a G1 checkpoint into a T1-configured 5-layer
+MLP, reinitializing layers 1 and 5, and continue training.
 
-- **4.1** Design the adapter strategy per Phase 0.2. Concretely, that means
-  deciding:
-  - which parameter tensors to copy from G1 checkpoint
-  - which to reinitialize
-  - whether any layers should be frozen early in finetuning
-- **4.2** Extend `train_agent.py` (or add a sibling entry point) with a
-  `--finetune-from <ckpt>` flag that loads G1 weights into a T1-configured
-  policy with the adapter strategy from 4.1.
-  - Handle shape mismatches explicitly — don't silently skip layers.
-  - Log which params were loaded vs. reinit-ed vs. frozen.
-- **4.3** Handle value/critic network too. Common gotcha: copying the actor
-  but not the critic leads to huge initial value errors and unstable early
-  finetuning. Decide: reinit critic, copy critic, or warmup critic-only
-  for N steps.
-- **4.4** Handle observation/action normalizers. The G1 empirical
-  normalization stats are wrong for T1's obs distribution. Reset or
-  rescale them.
-- **4.5** Write a config for the finetune run (smaller LR, possibly shorter
-  horizon, KL-penalty to prior? decide).
-- **4.6** End-to-end smoke test: load G1 ckpt, step the T1 env for a few
-  iterations, confirm nothing crashes and early rewards are non-pathological.
+- **4.1 Architecture.** T1 policy is the same 5-layer MLP as G1 (same
+  hidden width — locked in Phase 2.2). Layer 1 input dim is `t1_obs_dim`;
+  layer 5 output dim is `t1_act_dim`. Layers 2/3/4 are bit-identical in
+  shape to G1.
+  - Read `config_values/wbt/g1/observation.py` and the Phase 3.1 T1 obs
+    config to confirm obs dims. Action dims from `config_values/robot.py`.
+  - Initialization for reinit layers: use the same init the repo uses for
+    scratch training (likely orthogonal or small-gain default in
+    `holosoma/agents/modules/`). No need for near-zero-init — the middle
+    layers already carry the G1 prior and layer 5 must learn to route
+    into T1's joint order from scratch anyway.
+- **4.2 Checkpoint loader.** Extend `train_agent.py` (or add a sibling
+  entry point) with a `--finetune-from <ckpt>` flag that:
+  - loads layers 2, 3, 4 (both weights and biases) from the G1 checkpoint,
+  - freshly initializes layers 1 and 5 per repo defaults,
+  - logs which params were loaded vs. reinitialized,
+  - errors loudly on unexpected shape mismatches on the middle layers —
+    don't silently skip (that would mean the G1 and T1 hidden widths
+    drifted apart, which invalidates the whole transfer).
+- **4.3 Critic handling.** Apply the same reinit-first-and-last scheme
+  to the critic: load layers 2/3/4 from the G1 critic, reinit layers 1
+  and 5. Rationale: T1 observations feed a different first layer, and
+  the value scale on T1 may differ anyway — a fresh head is safer than
+  a fresh-obs-to-stale-head pairing. Consider critic-only warmup (freeze
+  actor for N steps) if early PPO/SAC updates look unstable.
+- **4.4 Normalizers.** G1's empirical obs/action normalization stats are
+  wrong for T1. Reset them and let them re-accumulate from T1 rollouts,
+  or collect a small T1 warmup buffer to seed them before the first
+  policy update.
+- **4.5 Finetune hyperparameters.** Likely smaller LR than scratch
+  training; consider a KL penalty or trust-region against the G1 prior
+  for the first few updates to avoid wrecking transferred middle layers.
+  Freeze experiment — don't re-tune per data fraction.
+- **4.6 Freezing schedule (optional ablation).** Worth trying: freeze
+  middle layers (2/3/4) for the first K steps (train only the reinit-ed
+  layers 1 and 5), then unfreeze everything. Cheap to add, sometimes
+  meaningfully more stable.
+- **4.7 Smoke test.** Load G1 ckpt into T1 policy with layers 1 and 5
+  reinit-ed, step the T1 env, confirm no crashes and that early rewards
+  are not pathological. Note: unlike the adapter-with-near-zero-init
+  variant, the T1 policy at step 0 will produce near-random T1 actions
+  (because layer 5 is random), so immediate falls are expected — the
+  question is whether learning recovers within the first few iterations.
 
 ---
 
-## Phase 5 — RL algorithm comparison
+## Phase 5 — RL algorithm comparison (PPO vs. FastSAC)
 
-Goal: run PPO / FastSAC / FPO on the transfer task and compare.
+Goal: run PPO and FastSAC across scratch / finetuned × data-fraction and
+compare on the Phase 0.4 metrics.
 
-- **5.1 PPO baseline.** Already implemented at `holosoma/agents/ppo/`. Use
-  as the reference algorithm throughout Phases 2 & 4. Tune once, freeze
-  hyperparameters for the comparison.
-- **5.2 FastSAC.** Already implemented at `holosoma/agents/fast_sac/`. Off-
-  policy — finetuning dynamics may differ meaningfully from PPO, and SAC
-  with a loaded actor may need replay-buffer warmup before updates begin.
-- **5.3 FPO (stretch).** Flow-matching policy — not in the repo. Subtasks:
-  - 5.3.1 Literature pass: pick a specific flow-matching RL formulation
-    (there are several; they differ in how gradients flow through the
-    sampling chain). Write a 1-page design doc before coding.
-  - 5.3.2 Implement the policy module under `holosoma/agents/fpo/`,
-    following the `base_algo` interface.
-  - 5.3.3 Verify on a trivial env (e.g., a low-dim control task) *before*
-    plugging into the humanoid pipeline. Debugging flow RL bugs inside a
-    29-DOF humanoid env is painful.
-  - 5.3.4 Run the G1→T1 finetune experiment with FPO.
-  - Fallback: if FPO is unstable after a bounded effort (e.g. 2 weeks),
-    ship PPO + FastSAC results and leave FPO as future work.
-- **5.4** For each algorithm, run the data-fraction sweep from Phase 0.3
-  with at least 3 seeds per point. Budget this — it's the most expensive
-  step.
+- **5.1 PPO.** Already implemented at `holosoma/agents/ppo/`. Reference
+  algorithm throughout Phases 2 & 4. Tune once on G1 pretraining
+  (Phase 2), freeze hyperparameters for the comparison sweep.
+- **5.2 FastSAC.** Already implemented at `holosoma/agents/fast_sac/`.
+  Off-policy — watch for these differences vs. PPO when finetuning:
+  - Replay buffer starts empty; may want a T1 rollout warmup before
+    updates begin, otherwise early gradients are dominated by actor-loss
+    on near-untrained critic.
+  - SAC's entropy target is a meaningful knob during finetuning — too
+    high and it immediately randomizes away from the G1 prior.
+- **5.3 Sweep grid.** For each
+  `(algorithm ∈ {PPO, FastSAC}) × (mode ∈ {scratch, finetune}) × (frac ∈ {1, 5, 10, 25, 50, 100}%)`
+  run ≥3 seeds. That's 2×2×6×3 = **72 runs**. Budget compute and storage
+  accordingly; stagger so you see scratch-vs-finetune at 10% early for a
+  quick sanity signal before committing to the full grid.
+- **5.4 Hyperparameter fairness.** PPO and FastSAC can't share hyperparams
+  literally, but do freeze each algorithm's hyperparams across the sweep
+  so the only independent variable is `(mode, frac)`. Document what you
+  tuned and where.
 
 ---
 
 ## Phase 6 — Evaluation and analysis
 
-- **6.1** Compute Phase 0.4 metrics across all `(algorithm, data_fraction,
-  seed)` runs. Aggregate into a results table / dataframe.
-- **6.2** Produce the key plot: sample efficiency vs. data fraction, with
-  and without G1 pretraining, per algorithm.
-- **6.3** Qualitative: render comparison videos (scratch vs. transferred)
-  on held-out T1 motion clips. Deploy best policy via `holosoma_inference/`
-  on the real robot if hardware time is available.
-- **6.4** Ablations worth considering: which layers to reinit (Phase 0.2
-  variants), critic handling (Phase 4.3), dataset-distribution mismatch
-  (train G1 on walking-only, transfer to T1 dancing — does the prior still
-  help or hurt?).
+- **6.1** Compute the three Phase 0.4 metrics — (a) motion tracking error,
+  (b) torso velocity tracking error, (c) locomotion stability (survival
+  time / fall rate) — across all `(algorithm, mode, data_fraction, seed)`
+  runs on a held-out T1 clip set. Aggregate into one dataframe.
+- **6.2** Key plots:
+  - per-metric learning curve: metric vs. data fraction, with separate
+    lines for scratch vs. finetuned, one subplot per algorithm
+  - same grid but for sample efficiency (env steps to threshold)
+- **6.3** Qualitative: render comparison videos (scratch vs. finetuned) on
+  held-out T1 clips. Deploy best finetuned policy via `holosoma_inference/`
+  on real T1 if hardware time is available.
+- **6.4** Ablations worth considering (cheap wins, do if time permits):
+  - critic handling variants (Phase 4.3)
+  - freezing schedule (Phase 4.6)
+  - distribution mismatch: pretrain G1 on walking only, transfer to T1
+    dancing — does the prior still help, or hurt?
 
 ---
 
@@ -183,7 +238,21 @@ Goal: run PPO / FastSAC / FPO on the transfer task and compare.
   on retargeting configs if tracking error plateaus high.
 - **Critic transfer is underappreciated.** Several transfer-RL papers find
   critic reinit matters more than actor reinit. Worth an explicit ablation.
-- **FPO scope creep.** Easiest way to sink the project. Timebox hard.
 - **Reward hacking.** Motion-tracking policies love to exploit reward
   terms (e.g., satisfying pos error by standing still at a mean pose).
   Eyeball rollouts, don't trust reward curves alone.
+- **Cold-start falls.** Layer 5 is randomly initialized, so the T1 policy
+  at step 0 outputs near-random actions and the robot will fall
+  immediately. That's expected — the signal to watch is whether reward
+  curves recover within the first few iterations rather than diverging.
+- **Middle-layer clobbering.** The gradient flowing into layers 2/3/4
+  from a freshly-random layer 5 can be large and noisy in the first few
+  updates, which may damage the pretrained representations before they
+  get useful gradients. The freezing schedule in 4.6 is the main
+  mitigation; the KL-to-prior penalty in 4.5 is the backup.
+- **Hidden-width drift.** If G1 pretrain hidden width ≠ T1 finetune
+  hidden width, the middle-layer load fails. The shape-mismatch check
+  in 4.2 exists specifically to catch this early instead of silently.
+- **Sweep cost.** 72 runs × single-seed training time can be weeks of
+  GPU-hours. Stage the sweep: get one `(algo, mode, 10%)` cell fully
+  working end-to-end before fanning out.
