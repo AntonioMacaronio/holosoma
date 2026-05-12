@@ -1,1 +1,2 @@
-To utilize the holosoma repository, please see the /home/sky/sky_workdir/holosoma/SETUP_NOTES.md for how we set up the repo on this machine.
+There are 2 setups that were followed for this repo depending on the machine that you are on. If you are on Ubuntu 20.04, chances are the code was set up with `SETUP_NOTES.md`
+If you are on Ubuntu 24.04, chances are the code was set up with `SETUP_ISAACSIM_NOTES.md`
