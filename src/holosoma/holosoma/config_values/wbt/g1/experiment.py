@@ -15,6 +15,28 @@ from holosoma.config_values import (
     terrain,
 )
 
+# Widen PPO to 5 Linear layers for cross-embodiment transfer: layer 1 and layer 5
+# will be reinit-ed on T1, layers 2/3/4 must stay bit-shape-identical across G1
+# pretrain and T1 finetune. See cross_embodiment_proj_notes/plan.md Phase 0.2.
+_G1_WBT_PPO_HIDDEN_DIMS = [512, 512, 256, 128]
+_g1_wbt_ppo_module_dict = replace(
+    algo.ppo.config.module_dict,
+    actor=replace(
+        algo.ppo.config.module_dict.actor,
+        layer_config=replace(
+            algo.ppo.config.module_dict.actor.layer_config,
+            hidden_dims=_G1_WBT_PPO_HIDDEN_DIMS,
+        ),
+    ),
+    critic=replace(
+        algo.ppo.config.module_dict.critic,
+        layer_config=replace(
+            algo.ppo.config.module_dict.critic.layer_config,
+            hidden_dims=_G1_WBT_PPO_HIDDEN_DIMS,
+        ),
+    ),
+)
+
 g1_29dof_wbt = ExperimentConfig(
     training=TrainingConfig(
         project="WholeBodyTracking",
@@ -38,6 +60,7 @@ g1_29dof_wbt = ExperimentConfig(
             use_symmetry=False,
             actor_optimizer=replace(algo.ppo.config.actor_optimizer, weight_decay=0.000),
             critic_optimizer=replace(algo.ppo.config.critic_optimizer, weight_decay=0.000),
+            module_dict=_g1_wbt_ppo_module_dict,
         ),
     ),
     simulator=replace(
