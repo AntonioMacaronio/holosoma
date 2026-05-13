@@ -197,8 +197,8 @@ compare on the Phase 0.4 metrics.
   - SAC's entropy target is a meaningful knob during finetuning — too
     high and it immediately randomizes away from the G1 prior.
 - **5.3 Sweep grid.** For each
-  `(algorithm ∈ {PPO, FastSAC}) × (mode ∈ {scratch, finetune}) × (frac ∈ {1, 5, 10, 25, 50, 100}%)`
-  run ≥3 seeds. That's 2×2×6×3 = **72 runs**. Budget compute and storage
+  `(algorithm ∈ {PPO, FastSAC}) × (mode ∈ {scratch, finetune}) × (frac ∈ {5, 20, 50, 100}%)`
+  run ≥3 seeds. That's 2×2×4×3 = **48 runs**. Budget compute and storage
   accordingly; stagger so you see scratch-vs-finetune at 10% early for a
   quick sanity signal before committing to the full grid.
 - **5.4 Hyperparameter fairness.** PPO and FastSAC can't share hyperparams
@@ -228,7 +228,8 @@ compare on the Phase 0.4 metrics.
     dancing — does the prior still help, or hurt?
 
 We actually ended up using these metrics for Table 1:
-Motion Error = Env/motion/error_body_pos 
+Joint Pos Error = Env/motion/error_body_pos 
+Joint Angle Error = Env/motion/error_joint_pos
 Velocity Error = Env/motion/error_ref_lin_vel
 Avg Episode Length =  Env/average_episode_length
 ---
