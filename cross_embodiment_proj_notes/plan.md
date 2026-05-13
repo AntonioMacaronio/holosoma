@@ -227,6 +227,10 @@ compare on the Phase 0.4 metrics.
   - distribution mismatch: pretrain G1 on walking only, transfer to T1
     dancing — does the prior still help, or hurt?
 
+We actually ended up using these metrics for Table 1:
+Motion Error = Env/motion/error_body_pos 
+Velocity Error = Env/motion/error_ref_lin_vel
+Avg Episode Length =  Env/average_episode_length
 ---
 
 ## Risks and watch-items
